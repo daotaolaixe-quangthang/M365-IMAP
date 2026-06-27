@@ -12,9 +12,8 @@ import smtplib
 import sys
 from email.message import EmailMessage
 
-from msal import ConfidentialClientApplication, SerializableTokenCache
-
 import config
+from auth_client import create_app
 
 
 IMAP_HOST = "outlook.office365.com"
@@ -24,13 +23,7 @@ SMTP_PORT = 587
 
 # Create an MSAL client using the settings from config.py.
 def _get_app():
-    cache = SerializableTokenCache()
-    return ConfidentialClientApplication(
-        client_id=config.ClientId,
-        client_credential=config.ClientSecret or None,
-        token_cache=cache,
-        authority=config.Authority,
-    )
+    return create_app()
 
 
 # Get a fresh access token using the stored refresh token.

@@ -1,200 +1,571 @@
-# Using Microsoft 365 IMAP/SMTP with OAuth2
+# Microsoft Outlook OAuth token và Graph API demo
 
-This repository provides instructions and small helper scripts to obtain and refresh OAuth2 tokens for Microsoft 365.  
-You can then use these with:
-- **[offlineimap3](https://github.com/OfflineIMAP/offlineimap3)** to read/sync your mailbox via IMAP
-- **[msmtp](https://wiki.debian.org/msmtp)** (or similar) to send mail via SMTP
-- **[mutt](http://www.mutt.org/)** to do both
-- a small Python demo script (`demo.py`) that shows both.
+Project này dùng Python để lấy OAuth token cho tài khoản Outlook/Microsoft 365 bằng public client ID của Thunderbird, sau đó tái sử dụng refresh token để đọc email qua Microsoft Graph API.
 
-The basic idea:
-1. Use `get_token.py` once to log in via a browser and obtain an initial **refresh token**.
-2. Use `refresh_token.py` whenever you need a new **access token**.
-3. Configure your IMAP/SMTP tools to authenticate with XOAUTH2 using that access token.
+Client ID mặc định:
 
-Your Microsoft 365 tenant must be configured to allow IMAP/SMTP with modern authentication, and your admin must grant permissions for the chosen client ID.
-
----
-## Choosing a client ID
-There are two options.
-
-### 1. Use Thunderbird’s public client ID (no secret)
-Thunderbird uses a public Azure AD application with:
 ```text
-Client ID:     9e5f94bc-e8a4-4e73-b8be-63364c29d753
+9e5f94bc-e8a4-4e73-b8be-63364c29d753
 ```
-Note that the updated version doesn't rely on a "client secret" any longer.
-Your organisation’s admin must once approve this app for your tenant, granting at least:
-- `IMAP.AccessAsUser.All`
-- `SMTP.Send`
-- `offline_access`
 
-Note that there isn't a hard connection to, for instance, Thunderbird's Azure Client ID, meaning that you could use the same ID for other tools as well (offlineimap3, msmtp, scripts).
+Project cũng vẫn giữ demo IMAP/SMTP XOAUTH2 cũ để đọc hoặc gửi mail qua `outlook.office365.com` và `smtp.office365.com`.
 
-### 2. Use your own Azure AD app registration
-If you manage Azure AD yourself, you can create a dedicated app registration and grant it the same permissions.
+## Mục tiêu chính
 
-In that case, set in `config.py`:
+- Lấy `refresh_token` cho tài khoản Outlook/Microsoft 365.
+- Lưu token vào file trong thư mục project.
+- Tái sử dụng `refresh_token` để lấy `access_token` mới.
+- Đọc danh sách email mới nhất bằng Microsoft Graph API.
+- Hỗ trợ workflow manual khi đăng nhập trên Chrome Android, ví dụ điện thoại Samsung đang kết nối ADB với Windows.
+- Không cần client secret khi dùng public client ID Thunderbird.
+
+## Cấu trúc file
+
+| File | Vai trò |
+| --- | --- |
+| `config.py` | Cấu hình client ID, client secret nếu có, scopes và tên file lưu token. |
+| `auth_client.py` | Tạo MSAL client. Nếu `ClientSecret` rỗng thì dùng public client. Nếu có secret thì dùng confidential client. |
+| `get_token.py` | Chạy OAuth authorization code flow để lấy refresh token và access token lần đầu. |
+| `refresh_token.py` | Dùng refresh token đã lưu để lấy access token mới. |
+| `graph_demo.py` | Dùng Graph API để đọc email Outlook mới nhất. |
+| `demo.py` | Demo IMAP/SMTP XOAUTH2 cũ, dùng token IMAP/SMTP để đọc inbox hoặc gửi email. |
+| `requirements.txt` | Danh sách thư viện Python cần cài. |
+| `server.cert`, `server.key` | Certificate tự ký cho local HTTPS callback `https://localhost:7598/`. |
+| `.gitignore` | Bỏ qua virtualenv và các file token nhạy cảm. |
+
+## Token files
+
+Project có 2 nhóm token riêng:
+
+| Profile | Refresh token file | Access token file | Dùng cho |
+| --- | --- | --- | --- |
+| `graph` | `graph_refresh_token` | `graph_access_token` | Microsoft Graph API. |
+| `imap_smtp` | `imap_smtp_refresh_token` | `imap_smtp_access_token` | IMAP/SMTP XOAUTH2. |
+
+Các file token này là bí mật. Không gửi cho người khác, không paste vào chat, không commit lên git.
+
+## Logic OAuth đang triển khai
+
+### 1. `config.py`
+
+File này đang cấu hình:
+
 ```python
-ClientId = "<your client id>"
-ClientSecret = "<your client secret>"
-```
-The rest of the instructions stay the same. Again, notice that not all applications need both (like Thunderbird).
-
----
-## Obtaining auth tokens
-### Step 1: initial login (`get_token.py`)
-Modify `config.py` so `ClientId` (and optionally `ClientSecret`) match the client you want to use.
-
-Then run:
-```bash
-pip install -r requirements.txt
-python3 get_token.py
-```
-What happens:
-1. A browser window/tab opens to the Microsoft 365 login page.
-2. You sign in with your M365 account.
-3. After login you are redirected to `https://localhost:7598/`.
-4. `get_token.py` captures the authorization code and exchanges it for tokens (see the terminal as well).
-
-Note that you could see some irrelevant warnings related to certificates in the terminal.
-
-The script writes two files in the repository directory:
-- `imap_smtp_refresh_token` – **refresh token**, long‑lived
-- `imap_smtp_access_token` – **access token**, short‑lived
-
-If the automatic browser/open redirect does not work (e.g. over SSH), the script asks you to paste the final URL manually.
-
-You normally only need to run `get_token.py` once per account/client combination.
-
-### Step 2: refreshing tokens (`refresh_token.py`)
-When you need a fresh access token (for SMTP or your own scripts), run:
-```bash
-python3 refresh_token.py
-```
-This script:
-- reads the refresh token from `imap_smtp_refresh_token`
-- requests a new access token
-- updates `imap_smtp_refresh_token` with the new refresh token
-- prints the new access token to stdout
-
-IMAP/SMTP clients can call this script as a `passwordeval`/`passwordcmd` to always send a valid access token.
-
----
-## Using offlineimap3
-Install offlineimap3 (e.g. via pip or your distro):
-```bash
-pip install offlineimap3
-```
-Create or edit `~/.offlineimaprc` with a minimal configuration like:
-```ini
-[general]
-accounts = M365
-
-[Account M365]
-localrepository  = Local
-remoterepository = Remote
-
-[Repository Local]
-type         = Maildir
-localfolders = ~/Maildir
-
-[Repository Remote]
-type = IMAP
-remotehost = outlook.office365.com
-remoteuser = <your M365 email>
-ssl = yes
-
-# OAuth2 settings
-auth_mechanisms    = XOAUTH2
-oauth2_request_url = https://login.microsoftonline.com/common/oauth2/v2.0/token
-
-# Thunderbird client ID (no secret)
-oauth2_client_id     = 9e5f94bc-e8a4-4e73-b8be-63364c29d753
-oauth2_client_secret =
-
-# Contents of the file written by get_token.py
-oauth2_refresh_token = <contents of imap_smtp_refresh_token>
-
-# Optional: skip non‑mail folders
-# folderfilter = lambda folder: not folder.startswith('Calendar') and not folder.startswith('Contacts')
-```
-Then run:
-```bash
-offlineimap3
-```
-to synchronise your mailbox into `~/Maildir`.
-
-If you use your own Azure app instead of Thunderbird’s, just replace `oauth2_client_id` and `oauth2_client_secret` accordingly.
-
----
-## Using msmtp
-Install msmtp and create `~/.msmtprc`:
-```ini
-account m365
-host smtp.office365.com
-port 587
-tls on
-tls_starttls on
-
-from <your M365 email>
-user <your M365 email>
-auth xoauth2
-
-# Always get a fresh access token
-passwordeval "python3 /path/to/refresh_token.py"
-```
-Send a test message with:
-```bash
-echo "Test" | msmtp -a m365 someone@example.com
+ClientId = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
+ClientSecret = ""
 ```
 
-Any other SMTP client that can run an external command to obtain the password can use the same pattern: call `refresh_token.py` and treat the printed access token as the XOAUTH2 password.
+Vì `ClientSecret` rỗng, project dùng public client flow, phù hợp với client ID Thunderbird.
 
----
-## Using mutt
-Install mutt and config `~/.muttrc`:
-```bash
-set imap_user = <your M365 email>
-set folder = imaps://${imap_user}@outlook.office365.com:993/
-set imap_authenticators = "xoauth2"
-set imap_oauth_refresh_command = "python3 /path/to/refresh_token.py"
-set smtp_url = smtp://${imap_user}@smtp.office365.com:587
-set smtp_authenticators = "xoauth2"
-set smtp_oauth_refresh_command = ${imap_oauth_refresh_command}
+Scopes cho Graph API:
+
+```python
+GraphScopes = [
+    "https://graph.microsoft.com/User.Read",
+    "https://graph.microsoft.com/Mail.Read",
+]
 ```
 
----
-## Python demo client (`demo.py`)
-`demo.py` is a small example script that reuses the same tokens (scripts) to access your mailbox from the local terminal.
+Không khai báo thủ công `offline_access` trong `GraphScopes` vì MSAL coi `offline_access`, `openid`, `profile` là reserved scopes và tự thêm vào URL OAuth khi cần.
 
-Usage:
-```bash
-python3 demo.py
+Scopes cho IMAP/SMTP:
+
+```python
+ImapSmtpScopes = [
+    "https://outlook.office.com/IMAP.AccessAsUser.All",
+    "https://outlook.office.com/SMTP.Send",
+]
 ```
-The script will:
-1. Ask you to choose `inbox` or `message`.
-2. For `inbox`: fetch and print the 15 most recent emails from your INBOX using IMAP + XOAUTH2.
-3. For `message`: prompt for recipients, subject and body, then send the mail via SMTP + XOAUTH2.
 
-Internally it uses the same refresh‑token mechanism as `refresh_token.py` and connects directly to:
-- `outlook.office365.com` (IMAP)
-- `smtp.office365.com` (SMTP)
+### 2. `auth_client.py`
 
-This is meant as a simple, readable example of how to apply the access and refresh tokens from AD.
+File này có 2 nhiệm vụ:
 
----
-## Security notes
-- The refresh token in `imap_smtp_refresh_token` grants full access to your mailbox for the configured app. Protect this file using the right permissions, encryption, keyring, etc.
-- Treat access tokens like passwords; they are short‑lived but still sensitive.
-- If a token is compromised, revoke access by removing the app’s consent in Azure AD and re‑running `get_token.py`.
+- `create_app()` tạo MSAL application.
+- `get_token_config(profile)` chọn đúng scopes và tên file token theo profile.
 
----
-## Files in this repository
-- `config.py`          – client ID/secret and scope configuration
-- `get_token.py`       – run once to obtain initial refresh/access tokens
-- `refresh_token.py`   – refreshes the access token and updates the refresh token
-- `demo.py`            – simple IMAP/SMTP demo (inbox listing + send mail)
-- `imap_smtp_refresh_token` / `imap_smtp_access_token` – token storage files
-- `requirements.txt`   – Python dependencies (MSAL)
+Nếu `ClientSecret` có giá trị:
 
+```text
+ConfidentialClientApplication
+```
+
+Nếu `ClientSecret` rỗng:
+
+```text
+PublicClientApplication
+```
+
+Với workflow hiện tại dùng Thunderbird public client ID, project sẽ dùng `PublicClientApplication`.
+
+### 3. `get_token.py`
+
+File này dùng để lấy token lần đầu.
+
+Luồng mặc định:
+
+```text
+CLI in OAuth URL -> bạn mở URL trong browser -> Microsoft login -> redirect về https://localhost:7598/ -> script nhận code -> đổi code thành token -> ghi file token
+```
+
+Luồng manual mode:
+
+```text
+CLI in OAuth URL -> bạn mở URL ở browser bất kỳ -> Microsoft login -> browser redirect về localhost và có thể báo lỗi -> bạn copy URL cuối có code=... -> paste vào terminal -> script đổi code thành token -> ghi file token
+```
+
+Manual mode đặc biệt phù hợp khi bạn mở link OAuth trên Chrome Android, vì `localhost` trên Android là điện thoại Android, không phải Windows.
+
+### 4. `refresh_token.py`
+
+File này dùng refresh token đã lưu để lấy access token mới.
+
+Ví dụ với Graph:
+
+```powershell
+.\.venv\Scripts\python.exe refresh_token.py graph
+```
+
+Script sẽ:
+
+- Đọc `graph_refresh_token`.
+- Gọi Microsoft token endpoint qua MSAL.
+- Ghi refresh token mới nếu Microsoft trả về refresh token mới.
+- Ghi access token mới vào `graph_access_token`.
+- In access token ra terminal.
+
+### 5. `graph_demo.py`
+
+File này đọc email qua endpoint:
+
+```text
+https://graph.microsoft.com/v1.0/me/messages
+```
+
+Mỗi lần chạy, script sẽ:
+
+- Đọc `graph_refresh_token`.
+- Lấy `access_token` mới qua MSAL.
+- Gọi Microsoft Graph API.
+- Lấy các trường: `receivedDateTime`, `from`, `subject`, `bodyPreview`, `webLink`.
+- In email mới nhất ra terminal.
+
+Tham số số lượng email:
+
+```powershell
+.\.venv\Scripts\python.exe graph_demo.py 5
+```
+
+Số `5` nghĩa là lấy 5 email mới nhất. Nếu không truyền số, mặc định lấy 15 email.
+
+## Cài đặt trên Windows PowerShell
+
+Mở PowerShell tại thư mục project:
+
+```powershell
+cd E:\2WEBApp\M365-IMAP
+```
+
+Kiểm tra Python:
+
+```powershell
+python --version
+```
+
+Tạo virtualenv:
+
+```powershell
+python -m venv .venv
+```
+
+Cài dependencies:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Kiểm tra thư viện đã cài:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip list
+```
+
+Kiểm tra cú pháp các script:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile auth_client.py config.py get_token.py refresh_token.py graph_demo.py demo.py
+```
+
+## Cách 1: Lấy Graph refresh token bằng manual mode, khuyến nghị cho Android Chrome
+
+Đây là cách nên dùng nếu bạn muốn tạo tài khoản/login Microsoft trên Chrome Android rồi lấy token về project Windows.
+
+Chạy lệnh:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+Terminal sẽ in ra OAuth URL dạng:
+
+```text
+https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=...
+```
+
+Làm tiếp như sau:
+
+1. Copy toàn bộ URL từ terminal.
+2. Mở Chrome Android trên điện thoại.
+3. Paste URL vào thanh địa chỉ Chrome Android.
+4. Đăng nhập Microsoft/Outlook thành công.
+5. Sau khi login, Chrome Android sẽ redirect về:
+
+```text
+https://localhost:7598/?code=...
+```
+
+6. Vì đây là `localhost` của Android, trang có thể báo certificate error hoặc connection error. Điều này bình thường trong manual mode.
+7. Copy toàn bộ URL trên thanh địa chỉ Chrome Android.
+8. Quay lại PowerShell Windows.
+9. Paste URL đó vào dòng hỏi:
+
+```text
+Paste final redirect URL or code:
+```
+
+Nếu thành công, terminal sẽ in:
+
+```text
+Refresh token acquired, writing to file graph_refresh_token
+Access token acquired, writing to file graph_access_token
+```
+
+Sau bước này, project đã có refresh token Graph để đọc email.
+
+## Cách 2: Lấy Graph refresh token bằng local callback trên Windows
+
+Cách này phù hợp khi bạn mở OAuth URL bằng browser trên chính máy Windows.
+
+Chạy:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph
+```
+
+Terminal sẽ in OAuth URL. Copy URL đó và mở bằng browser Windows.
+
+Sau khi login, browser redirect về:
+
+```text
+https://localhost:7598/
+```
+
+Script Python trên Windows đang nghe port `7598`, nên nó sẽ tự nhận authorization code và tạo:
+
+```text
+graph_refresh_token
+graph_access_token
+```
+
+Nếu browser báo cảnh báo certificate do `server.cert` là self-signed certificate, bạn có thể dùng manual mode ở phần trên.
+
+## Cách 3: Android Chrome với ADB reverse, tùy chọn
+
+Nếu bạn muốn Android Chrome redirect trực tiếp về server Python trên Windows mà không copy URL cuối thủ công, có thể thử ADB reverse.
+
+Điện thoại Android cần đang kết nối ADB với Windows.
+
+Kiểm tra thiết bị:
+
+```powershell
+adb devices
+```
+
+Tạo reverse port:
+
+```powershell
+adb reverse tcp:7598 tcp:7598
+```
+
+Chạy OAuth callback mode:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph
+```
+
+Copy OAuth URL từ terminal, mở bằng Chrome Android và đăng nhập.
+
+Nếu ADB reverse hoạt động, request từ Android:
+
+```text
+https://localhost:7598/
+```
+
+sẽ được chuyển về Windows port `7598`, và script sẽ tự tạo token files.
+
+Nếu gặp lỗi certificate hoặc không redirect được, quay lại manual mode:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+## Đọc email Outlook qua Microsoft Graph API
+
+Sau khi đã có `graph_refresh_token`, chạy:
+
+```powershell
+.\.venv\Scripts\python.exe graph_demo.py
+```
+
+Mặc định lấy 15 email mới nhất.
+
+Lấy 5 email mới nhất:
+
+```powershell
+.\.venv\Scripts\python.exe graph_demo.py 5
+```
+
+Lấy 20 email mới nhất:
+
+```powershell
+.\.venv\Scripts\python.exe graph_demo.py 20
+```
+
+Kết quả sẽ gồm các thông tin:
+
+```text
+Date
+From
+Subject
+Preview
+Link
+```
+
+`Link` là link mở email trong Outlook web.
+
+## Refresh Graph access token thủ công
+
+Nếu chỉ muốn refresh access token mà không đọc mail:
+
+```powershell
+.\.venv\Scripts\python.exe refresh_token.py graph
+```
+
+Script sẽ đọc:
+
+```text
+graph_refresh_token
+```
+
+và ghi:
+
+```text
+graph_access_token
+```
+
+Access token cũng được in ra terminal. Không chia sẻ access token này.
+
+## Xóa token để login lại tài khoản khác
+
+Nếu muốn đổi tài khoản Outlook/Microsoft, xóa token cũ trước.
+
+PowerShell:
+
+```powershell
+Remove-Item .\graph_refresh_token -ErrorAction SilentlyContinue
+Remove-Item .\graph_access_token -ErrorAction SilentlyContinue
+```
+
+Sau đó chạy lại:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+## IMAP/SMTP profile cũ
+
+Nếu bạn muốn dùng IMAP/SMTP XOAUTH2 thay vì Graph API, dùng profile `imap_smtp`.
+
+Lấy token IMAP/SMTP bằng callback mode:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py imap_smtp
+```
+
+Lấy token IMAP/SMTP bằng manual mode:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py imap_smtp --manual
+```
+
+Refresh token IMAP/SMTP:
+
+```powershell
+.\.venv\Scripts\python.exe refresh_token.py imap_smtp
+```
+
+Chạy demo IMAP/SMTP:
+
+```powershell
+.\.venv\Scripts\python.exe demo.py
+```
+
+Demo sẽ hỏi email và lựa chọn:
+
+```text
+inbox
+message
+```
+
+- `inbox`: đọc email từ INBOX bằng IMAP XOAUTH2.
+- `message`: gửi email bằng SMTP XOAUTH2.
+
+Lưu ý: với một số tài khoản Outlook cá nhân, Graph API thường dễ dùng hơn IMAP/SMTP. IMAP/SMTP có thể phụ thuộc cấu hình tenant hoặc chính sách tài khoản.
+
+## Các lệnh thường dùng
+
+### Cài lại dependencies
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+### Kiểm tra project compile được
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile auth_client.py config.py get_token.py refresh_token.py graph_demo.py demo.py
+```
+
+### Lấy Graph token bằng manual mode
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+### Đọc 5 email mới nhất
+
+```powershell
+.\.venv\Scripts\python.exe graph_demo.py 5
+```
+
+### Refresh Graph access token
+
+```powershell
+.\.venv\Scripts\python.exe refresh_token.py graph
+```
+
+### Kiểm tra ADB device
+
+```powershell
+adb devices
+```
+
+### Bật ADB reverse cho port 7598
+
+```powershell
+adb reverse tcp:7598 tcp:7598
+```
+
+### Xem trạng thái git
+
+```powershell
+git status --short
+```
+
+## Troubleshooting
+
+### Lỗi `Refresh token file graph_refresh_token not found`
+
+Bạn chưa lấy Graph refresh token lần đầu.
+
+Chạy:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+### Lỗi `You cannot use any scope value that is reserved`
+
+Không thêm thủ công `offline_access`, `openid`, `profile` vào scopes trong `config.py`. MSAL tự thêm các scope reserved này.
+
+### Android mở `https://localhost:7598/` nhưng không vào được
+
+Đây là bình thường nếu dùng Android Chrome mà không dùng ADB reverse. `localhost` trên Android là điện thoại, không phải Windows.
+
+Cách xử lý khuyến nghị:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+Sau đó copy URL cuối có `code=...` từ Chrome Android và paste vào terminal Windows.
+
+### Browser báo certificate error
+
+Project dùng `server.cert` và `server.key` self-signed cho local HTTPS callback. Nếu browser chặn certificate, dùng manual mode:
+
+```powershell
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+### Graph API trả lỗi 401 hoặc token invalid
+
+Thử refresh token:
+
+```powershell
+.\.venv\Scripts\python.exe refresh_token.py graph
+```
+
+Nếu vẫn lỗi, xóa token và login lại:
+
+```powershell
+Remove-Item .\graph_refresh_token -ErrorAction SilentlyContinue
+Remove-Item .\graph_access_token -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+### Graph API trả lỗi permission hoặc consent
+
+Tài khoản hoặc tenant có thể chưa cho phép app Thunderbird truy cập `Mail.Read`. Với tenant công ty, admin có thể cần consent app trước.
+
+### Không nên paste authorization code hoặc token vào chat
+
+Authorization code trong URL `code=...` thường dùng một lần, nhưng vẫn không nên chia sẻ. Refresh token và access token là bí mật nghiêm trọng hơn. Nếu đã lộ refresh token, nên revoke app access trong Microsoft account/Azure và tạo token mới.
+
+## Bảo mật
+
+- `graph_refresh_token` có thể dùng để lấy access token mới và đọc email theo quyền đã consent.
+- `graph_access_token` là token ngắn hạn nhưng vẫn có thể đọc mail trong thời gian còn hiệu lực.
+- Không commit token lên git.
+- Không gửi token qua chat, log, email hoặc ticket.
+- Nếu token bị lộ, revoke quyền app trong Microsoft account hoặc Azure Portal rồi tạo lại token.
+- Chỉ dùng project này với tài khoản bạn sở hữu hoặc có quyền kiểm thử hợp lệ.
+
+## Ghi chú về Thunderbird public client ID
+
+Project dùng public client ID của Thunderbird để mô phỏng OAuth public client flow. Vì đây là public client, không có client secret.
+
+Điều này phù hợp cho công cụ desktop/script cá nhân, nhưng quyền truy cập vẫn phụ thuộc vào consent của Microsoft account hoặc tenant.
+
+## Workflow khuyến nghị hiện tại
+
+Nếu bạn tạo/login tài khoản Outlook trên Chrome Android và muốn lấy refresh token về Windows project, dùng workflow này:
+
+```powershell
+cd E:\2WEBApp\M365-IMAP
+.\.venv\Scripts\python.exe get_token.py graph --manual
+```
+
+Sau đó:
+
+1. Copy OAuth URL từ terminal.
+2. Paste vào Chrome Android.
+3. Login Microsoft.
+4. Copy URL cuối có `code=...` từ thanh địa chỉ Chrome Android.
+5. Paste vào terminal Windows.
+6. Chờ script ghi `graph_refresh_token`.
+7. Đọc email:
+
+```powershell
+.\.venv\Scripts\python.exe graph_demo.py 5
+```

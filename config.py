@@ -14,18 +14,29 @@ ClientId = "9e5f94bc-e8a4-4e73-b8be-63364c29d753"
 # Only set a value if you registered your own Azure AD app with a client secret.
 ClientSecret = ""
 
-# Scopes requested from Microsoft 365.
-# - IMAP.AccessAsUser.All : IMAP access
-# - SMTP.Send             : sending mail via SMTP
-# note that scopes like "offline_access" are explicitly not defined here.
-Scopes = [
+# Scopes requested from Microsoft 365 for IMAP/SMTP XOAUTH2.
+ImapSmtpScopes = [
     "https://outlook.office.com/IMAP.AccessAsUser.All",
     "https://outlook.office.com/SMTP.Send",
 ]
 
+# Scopes requested from Microsoft Graph for reading Outlook mail.
+# MSAL automatically adds reserved OIDC scopes like offline_access.
+GraphScopes = [
+    "https://graph.microsoft.com/User.Read",
+    "https://graph.microsoft.com/Mail.Read",
+]
+
+# Backwards-compatible aliases used by the original IMAP/SMTP scripts.
+Scopes = ImapSmtpScopes
+
 # Files used to store tokens created during OAuth flow by the scripts.
-RefreshTokenFileName = "imap_smtp_refresh_token"
-AccessTokenFileName = "imap_smtp_access_token"
+ImapSmtpRefreshTokenFileName = "imap_smtp_refresh_token"
+ImapSmtpAccessTokenFileName = "imap_smtp_access_token"
+GraphRefreshTokenFileName = "graph_refresh_token"
+GraphAccessTokenFileName = "graph_access_token"
+RefreshTokenFileName = ImapSmtpRefreshTokenFileName
+AccessTokenFileName = ImapSmtpAccessTokenFileName
 
 # Optional: tenant-specific authority, e.g.
 # Authority = "https://login.microsoftonline.com/<your-tenant-id>/"

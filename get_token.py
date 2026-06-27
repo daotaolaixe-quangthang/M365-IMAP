@@ -1,42 +1,80 @@
-from msal import ConfidentialClientApplication, SerializableTokenCache
-import config
+import argparse
 import http.server
 import os
+import ssl
 import sys
 import threading
 import urllib.parse
-import webbrowser
 from pathlib import Path
-import ssl
 
-# Redirect URI for the local helper. This must match the URI used when
-# granting consent to the client in Azure AD (Thunderbird uses this).
+from auth_client import create_app, get_token_config
+
 redirect_uri = "https://localhost:7598/"
 
-# Use a token cache so MSAL can manage tokens if needed.
-cache = SerializableTokenCache()
 
-app = ConfidentialClientApplication(
-    client_id=config.ClientId,
-    client_credential=config.ClientSecret or None,
-    token_cache=cache,
-    authority=config.Authority,
-)
-
-# Build the authorization URL for the browser-based login.
-url = app.get_authorization_request_url(config.Scopes, redirect_uri=redirect_uri)
-
-print("Navigate to the following URL in a web browser (it may open automatically):")
-print(url)
-try:
-    webbrowser.open(url)
-except Exception:
-    # In headless / SSH environments this may fail; user can copy-paste the URL.
-    pass
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Get OAuth tokens for Microsoft 365 profiles."
+    )
+    parser.add_argument(
+        "profile",
+        nargs="?",
+        default="imap_smtp",
+        help="Token profile to use: imap_smtp or graph.",
+    )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Do not start the local HTTPS callback server. Paste the final redirect URL manually.",
+    )
+    return parser.parse_args()
 
 
-# Minimal HTTPS handler to capture the ?code=... from the redirect.
+def extract_authorization_code(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+
+    parsed_url = urllib.parse.urlparse(value)
+    parsed_query = urllib.parse.parse_qs(parsed_url.query or parsed_url.fragment)
+    code = next(iter(parsed_query.get("code", [""])), "")
+    if code:
+        return code
+
+    if value.startswith("code="):
+        parsed_query = urllib.parse.parse_qs(value)
+        code = next(iter(parsed_query.get("code", [""])), "")
+        if code:
+            return code
+
+    marker = "code="
+    if marker in value:
+        start = value.find(marker) + len(marker)
+        end = value.find("&", start)
+        code = value[start:] if end == -1 else value[start:end]
+        return urllib.parse.unquote(code)
+
+    return value
+
+
+def read_code_manually() -> str:
+    print("Manual mode is active.")
+    print("After login, the browser may show a localhost certificate or connection error.")
+    print("Copy the full URL from the browser address bar and paste it here.")
+    print("You can also paste only the code value after code=.")
+
+    while True:
+        pasted = input("Paste final redirect URL or code: ").strip()
+        code = extract_authorization_code(pasted)
+        if code:
+            return code
+        print("No authorization code found. Please paste the full redirect URL or code value.")
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass
+
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
         parsed_query = urllib.parse.parse_qs(parsed_url.query)
@@ -50,54 +88,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response_body)
 
-        # Stop the HTTP server after this request.
         global httpd
         t = threading.Thread(target=httpd.shutdown)
         t.start()
 
 
-code = ""
+def read_code_from_callback_server() -> str:
+    global httpd
+    server_address = ("", 7598)
+    httpd = http.server.HTTPServer(server_address, Handler)
+    root = Path(__file__).parent
+    keyf, certf = root / "server.key", root / "server.cert"
+    assert keyf.exists() and certf.exists(), "server.key / server.cert not found"
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certf, keyf)
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
 
-# Start a small HTTPS server on localhost to receive the redirect.
-server_address = ("", 7598)
-httpd = http.server.HTTPServer(server_address, Handler)
-root = Path(__file__).parent
-keyf, certf = root / "server.key", root / "server.cert"
-assert keyf.exists() and certf.exists(), "server.key / server.cert not found"
-context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-context.load_cert_chain(certf, keyf)
-httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-
-# If we are running over SSH, the local browser cannot reach the remote
-# localhost:7598; in that case we will fall back to manual pasting.
-if not os.getenv("SSH_CONNECTION"):
+    print("Waiting for the login redirect on https://localhost:7598/ ...")
     httpd.serve_forever()
+    return code
 
-# Fallback: if the local HTTPS server did not receive a code, ask the user
-# to paste the final redirect URL manually.
-if code == "":
-    print(
-        "After login, you will be redirected to a (possibly blank) page "
-        "with a URL containing an access code."
+
+def main() -> None:
+    args = parse_args()
+    scopes, refresh_token_file, access_token_file = get_token_config(args.profile)
+    app = create_app()
+    url = app.get_authorization_request_url(scopes, redirect_uri=redirect_uri)
+
+    print("Copy the following URL and open it in the browser you want to use:")
+    print(url)
+
+    global code
+    code = ""
+    if args.manual or os.getenv("SSH_CONNECTION"):
+        code = read_code_manually()
+    else:
+        code = read_code_from_callback_server()
+        if not code:
+            code = read_code_manually()
+
+    token = app.acquire_token_by_authorization_code(
+        code,
+        scopes=scopes,
+        redirect_uri=redirect_uri,
     )
-    resp = input("Paste that full URL here: ").strip()
 
-    i = resp.find("code=") + 5
-    code = resp[i : resp.find("&", i)] if i > 4 else resp
+    if "error" in token:
+        print(token)
+        sys.exit("Failed to get access token")
 
-# Exchange the authorization code for tokens.
-token = app.acquire_token_by_authorization_code(
-    code, scopes=config.Scopes, redirect_uri=redirect_uri
-)
+    with open(refresh_token_file, "w") as f:
+        print(f"Refresh token acquired, writing to file {refresh_token_file}")
+        f.write(token["refresh_token"])
 
-if "error" in token:
-    print(token)
-    sys.exit("Failed to get access token")
+    with open(access_token_file, "w") as f:
+        print(f"Access token acquired, writing to file {access_token_file}")
+        f.write(token["access_token"])
 
-with open(config.RefreshTokenFileName, "w") as f:
-    print(f"Refresh token acquired, writing to file {config.RefreshTokenFileName}")
-    f.write(token["refresh_token"])
 
-with open(config.AccessTokenFileName, "w") as f:
-    print(f"Access token acquired, writing to file {config.AccessTokenFileName}")
-    f.write(token["access_token"])
+code = ""
+httpd = None
+
+if __name__ == "__main__":
+    main()
