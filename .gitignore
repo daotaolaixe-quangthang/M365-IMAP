@@ -5,5 +5,6 @@ imap_smtp_access_token
 graph_refresh_token
 graph_access_token
 .venv/
+.env
 _DS_Store
 .vscode/
