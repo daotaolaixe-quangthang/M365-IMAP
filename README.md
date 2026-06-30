@@ -29,6 +29,10 @@ Project cũng vẫn giữ demo IMAP/SMTP XOAUTH2 cũ để đọc hoặc gửi m
 | `refresh_token.py` | Dùng refresh token đã lưu để lấy access token mới. |
 | `graph_demo.py` | Dùng Graph API để đọc email Outlook mới nhất. |
 | `demo.py` | Demo IMAP/SMTP XOAUTH2 cũ, dùng token IMAP/SMTP để đọc inbox hoặc gửi email. |
+| `api_main.py` | FastAPI app, cung cấp API lấy OAuth link và đổi authorization code lấy refresh token. |
+| `api_schemas.py` | Định nghĩa JSON request/response cho API. |
+| `oauth_session_store.py` | Lưu `oauth_session` tạm thời trong memory khi chạy API. |
+| `oauth_utils.py` | Helper tạo random session/state và parse redirect URL để lấy `code`, `state`. |
 | `requirements.txt` | Danh sách thư viện Python cần cài. |
 | `server.cert`, `server.key` | Certificate tự ký cho local HTTPS callback `https://localhost:7598/`. |
 | `.gitignore` | Bỏ qua virtualenv và các file token nhạy cảm. |
@@ -193,8 +197,161 @@ Kiểm tra thư viện đã cài:
 Kiểm tra cú pháp các script:
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile auth_client.py config.py get_token.py refresh_token.py graph_demo.py demo.py
+.\.venv\Scripts\python.exe -m py_compile auth_client.py config.py get_token.py refresh_token.py graph_demo.py demo.py api_main.py api_schemas.py oauth_session_store.py oauth_utils.py
 ```
+
+## Chạy API OAuth Outlook
+
+Ngoài các script CLI terminal, project có thêm FastAPI service để lấy OAuth link và đổi authorization code thành refresh token qua HTTP API.
+
+Chạy API local:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn api_main:app --host 127.0.0.1 --port 8000
+```
+
+API mặc định chạy tại:
+
+```text
+http://127.0.0.1:8000
+```
+
+Kiểm tra API đang chạy:
+
+```powershell
+curl.exe http://127.0.0.1:8000/health
+```
+
+Response:
+
+```json
+{"status":"ok"}
+```
+
+### API 1: lấy link OAuth Outlook
+
+Endpoint:
+
+```http
+POST http://127.0.0.1:8000/api/outlook/oauth/link
+```
+
+PowerShell:
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/outlook/oauth/link
+```
+
+Response JSON mẫu:
+
+```json
+{
+  "oauth_session": "KXnQdLr4...",
+  "state": "qk1bU27D...",
+  "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=...",
+  "expires_in": 600
+}
+```
+
+Ý nghĩa:
+
+- `auth_url`: link Microsoft OAuth. Bạn copy link này và tự mở bằng Chrome, Edge, GPM Browser hoặc browser tùy ý.
+- `oauth_session`: session tạm thời của API. Cần giữ lại để gọi API thứ 2.
+- `state`: giá trị chống giả mạo OAuth. API tự lưu và kiểm tra lại khi đổi token.
+- `expires_in`: thời gian `oauth_session` còn hiệu lực, mặc định 600 giây.
+
+Sau khi mở `auth_url` và login Microsoft thành công, browser sẽ redirect về URL dạng:
+
+```text
+https://localhost:7598/?code=...&state=...
+```
+
+Trang có thể báo lỗi certificate hoặc không kết nối được `localhost`. Điều này vẫn bình thường nếu bạn chỉ cần lấy URL trên thanh địa chỉ. Hãy copy nguyên URL cuối cùng có `code=...` và `state=...`.
+
+### API 2: đổi redirect URL lấy refresh token
+
+Endpoint:
+
+```http
+POST http://127.0.0.1:8000/api/outlook/oauth/refresh-token
+```
+
+Request JSON, cách khuyến nghị là gửi nguyên redirect URL:
+
+```json
+{
+  "oauth_session": "KXnQdLr4...",
+  "redirect_url": "https://localhost:7598/?code=...&state=..."
+}
+```
+
+PowerShell:
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/outlook/oauth/refresh-token `
+  -H "Content-Type: application/json" `
+  -d '{"oauth_session":"PASTE_OAUTH_SESSION","redirect_url":"PASTE_FULL_REDIRECT_URL"}'
+```
+
+Nếu bạn dùng Git Bash:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/outlook/oauth/refresh-token \
+  -H "Content-Type: application/json" \
+  -d '{"oauth_session":"PASTE_OAUTH_SESSION","redirect_url":"PASTE_FULL_REDIRECT_URL"}'
+```
+
+Response JSON mẫu khi thành công:
+
+```json
+{
+  "refresh_token": "...",
+  "access_token": "...",
+  "expires_in": 3599,
+  "scope": "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read",
+  "token_type": "Bearer"
+}
+```
+
+Bạn lưu `refresh_token` này để dùng cho các API Microsoft Graph theo mục đích của bạn.
+
+API cũng hỗ trợ gửi `code` và `state` đã parse sẵn thay vì gửi nguyên `redirect_url`:
+
+```json
+{
+  "oauth_session": "KXnQdLr4...",
+  "code": "authorization-code",
+  "state": "qk1bU27D..."
+}
+```
+
+Lưu ý:
+
+- `oauth_session` chỉ lưu trong memory của process API đang chạy.
+- `oauth_session` hết hạn sau 600 giây.
+- Sau khi đổi token thành công, `oauth_session` sẽ bị xóa và không dùng lại được.
+- API không ghi refresh token ra file. API chỉ trả JSON để bạn tự lưu theo nhu cầu.
+- Không chia sẻ `refresh_token`, `access_token`, `code` hoặc redirect URL có `code=...` cho người khác.
+
+### Luồng test API nhanh
+
+1. Chạy API:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn api_main:app --host 127.0.0.1 --port 8000
+```
+
+2. Mở terminal khác, lấy OAuth link:
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/outlook/oauth/link
+```
+
+3. Copy `auth_url` trong response và mở bằng browser bạn muốn.
+4. Login Microsoft.
+5. Copy URL cuối trên thanh địa chỉ có `code=...&state=...`.
+6. Gọi API đổi token bằng `oauth_session` ở bước 2 và `redirect_url` ở bước 5.
+7. Lưu `refresh_token` trong response.
 
 ## Cách 1: Lấy Graph refresh token bằng manual mode, khuyến nghị cho Android Chrome
 
@@ -433,7 +590,7 @@ Lưu ý: với một số tài khoản Outlook cá nhân, Graph API thường d�
 ### Kiểm tra project compile được
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile auth_client.py config.py get_token.py refresh_token.py graph_demo.py demo.py
+.\.venv\Scripts\python.exe -m py_compile auth_client.py config.py get_token.py refresh_token.py graph_demo.py demo.py api_main.py api_schemas.py oauth_session_store.py oauth_utils.py
 ```
 
 ### Lấy Graph token bằng manual mode
