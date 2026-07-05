@@ -2,13 +2,24 @@
 
 Project này dùng Python để lấy OAuth token cho tài khoản Outlook/Microsoft 365 bằng public client ID của Thunderbird, sau đó tái sử dụng refresh token để đọc email qua Microsoft Graph API.
 
-Client ID mặc định:
+Thunderbird khi đăng nhập Outlook (Microsoft 365/Outlook.com) sử dụng OAuth2 với một Client ID đã được Mozilla đăng ký trên Microsoft Entra ID.
+
+Client ID này là public, bạn có thể xem được bằng cách:
+- Mở source của Thunderbird
+- Hoặc xem log OAuth
+- Hoặc bắt request khi Thunderbird bắt đầu OAuth
+
+Ví dụ request sẽ có dạng: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+
+Client ID không phải bí mật. Client ID mặc định:
 
 ```text
 9e5f94bc-e8a4-4e73-b8be-63364c29d753
 ```
 
 Project cũng vẫn giữ demo IMAP/SMTP XOAUTH2 cũ để đọc hoặc gửi mail qua `outlook.office365.com` và `smtp.office365.com`.
+
+Nếu ý bạn là kiểm tra xem một ứng dụng (ví dụ Thunderbird) đã được user consent hay chưa, với tài khoản Outlook cá nhân (@outlook.com, @hotmail.com, @live.com) bạn có thể kiểm tra các ứng dụng đã kết nối tại: `https://account.live.com/consent/Manage` Hoặc: `https://account.microsoft.com/privacy`
 
 ## Mục tiêu chính
 
